@@ -31,7 +31,7 @@
 </aside>
 <main class="content">
 <section id="dashboard" class="section active">
-<div class="pagehead"><div><div class="eyebrow">Vue d'ensemble</div><div class="title">Tableau de bord</div><div class="subtitle">Suivez les compétences SVT de vos élèves, évaluation après évaluation.</div></div><div style="display:flex;gap:9px;flex-wrap:wrap"><button class="secondary" onclick="importExcelStructure()">Importer la structure du classeur</button><button class="primary" onclick="openModal('evalModal')">＋ Nouvelle évaluation</button></div></div>
+<div class="pagehead"><div><div class="eyebrow">Vue d'ensemble</div><div class="title">Tableau de bord</div><div class="subtitle">Suivez les compétences SVT de vos élèves, évaluation après évaluation.</div></div><div style="display:flex;gap:9px;flex-wrap:wrap"><input id="excelFile" type="file" accept=".xlsx,.xlsm,.xls" style="display:none" onchange="importExcelWorkbook(this.files[0]);this.value=''"><button class="secondary" onclick="document.getElementById('excelFile').click()">Importer un classeur Excel</button><button class="primary" onclick="openModal('evalModal')">＋ Nouvelle évaluation</button></div></div>
 <div class="cards"><div class="card"><div class="muted">Classes</div><div class="kpi" id="kpiClasses">1</div><div class="muted">classe suivie</div></div><div class="card"><div class="muted">Élèves</div><div class="kpi" id="kpiStudents">10</div><div class="muted">élèves enregistrés</div></div><div class="card"><div class="muted">Évaluations</div><div class="kpi" id="kpiEvals">14</div><div class="muted">dans le suivi</div></div><div class="card"><div class="muted">Compétences</div><div class="kpi">C1 → C9</div><div class="muted">référentiel SVT</div></div></div>
 <div class="grid2"><div class="card"><div class="cardhead"><h2>Élèves</h2><button class="secondary" onclick="show('students')">Voir tous</button></div><div id="studentList"></div></div><div class="card"><div class="cardhead"><h2>Dernières évaluations</h2><button class="secondary" onclick="show('evals')">Voir tout</button></div><table class="table"><thead><tr><th>Évaluation</th><th>Comp.</th><th>Barème</th></tr></thead><tbody id="evalList"></tbody></table></div></div>
 </section>
@@ -51,6 +51,7 @@
 <div class="modal" id="radarModal"><div class="modalbox"><div class="cardhead"><h2 id="radarTitle">Profil élève</h2><button class="secondary" onclick="closeModal('radarModal')">✕</button></div><div class="radarbox"><svg class="radar" id="radarSvg" viewBox="0 0 420 340"></svg><div class="legend"><div><span class="dot"></span>Maîtrise actuelle</div><p>Les scores sont calculés à partir des évaluations pondérées associées à chaque compétence.</p><p class="muted">0 = non renseigné<br>1 = insuffisant<br>2 = fragile<br>3 = satisfaisant<br>4 = bonne maîtrise</p></div></div></div></div>
 <div class="modal" id="authModal"><div class="modalbox"><div class="cardhead"><h2>Connexion professeur</h2><button class="secondary" onclick="closeModal('authModal')">✕</button></div><p class="muted">Connectez-vous à votre compte Supabase pour charger et enregistrer vos données.</p><div class="formgrid"><div class="field"><label>Email</label><input id="authEmail" type="email" placeholder="professeur@exemple.fr"></div><div class="field"><label>Mot de passe</label><input id="authPassword" type="password"></div></div><div class="modal-actions"><button class="secondary" onclick="signUp()">Créer un compte</button><button class="primary" onclick="signIn()">Se connecter</button></div><p id="authStatus" class="muted"></p></div></div>
 <div class="toast" id="toast"></div>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 <script>
 const SUPABASE_URL='https://lfrzjspiyapxyihewexs.supabase.co';
 const PUBLIC_APP_URL=location.origin+location.pathname;
@@ -76,36 +77,45 @@ async function signUp(){const email=document.getElementById('authEmail').value.t
 function setAuthStatus(t){document.getElementById('authStatus').textContent=t}
 async function ensureProfile(){try{await api('/rest/v1/profiles?on_conflict=id',{method:'POST',headers:{Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify({id:teacherId,display_name:'Professeur SVT',role:'teacher'})})}catch(e){}}
 async function loadData(){if(!accessToken){classes=[{id:'demo',name:'Terminale spécialité SVT — Gr.2',school_year:'2026-2027'}];students=demoStudents.map((s,i)=>({id:'demo'+i,last_name:s[0],first_name:s[1],class_id:'demo'}));evals=demoEvals.map((e,i)=>({id:'demo'+i,title:e[0],competency:e[1],max_score:e[2],coefficient:e[3],evaluated_at:'2026-09-30',class_id:'demo'}));render();return}try{await ensureProfile();classes=await api('/rest/v1/classes?select=id,name,school_year&order=created_at.asc');if(!classes.length){students=[];evals=[];render();toast('Compte connecté — aucune donnée');return}const ids=classes.map(c=>c.id).join(',');const ss=await api('/rest/v1/students?select=id,class_id,first_name,last_name,public_token&class_id=in.('+ids+')&active=eq.true&order=last_name.asc');const ee=await api('/rest/v1/evaluations?select=id,class_id,title,evaluated_at,evaluation_competencies(competency_id,max_score,coefficient,competencies(code))&class_id=in.('+ids+')&order=evaluated_at.desc');students=ss;evals=ee.flatMap(e=>{const ec=e.evaluation_competencies||[];return ec.map(x=>({id:e.id,title:e.title,competency:x.competencies?.code||'—',competency_id:x.competency_id,max_score:x.max_score,coefficient:x.coefficient,evaluated_at:e.evaluated_at,class_id:e.class_id}))});render()}catch(e){toast('Erreur Supabase : '+e.message)}}
-async function importExcelStructure(){
- if(!accessToken){toast('Connectez-vous pour importer la structure');openModal('authModal');return}
- const className='Terminale spécialité SVT — Gr.2',year='2026-2027';
+async function importExcelWorkbook(file){
+ if(!file)return;
+ if(!accessToken){toast('Connectez-vous pour importer un classeur');openModal('authModal');return}
+ if(typeof XLSX==='undefined'){toast('Module Excel indisponible');return}
+ const className=prompt('Nom de la classe à importer :','Terminale spécialité SVT — Gr.2');
+ if(!className)return;
+ const year=prompt('Année scolaire :','2026-2027')||'2026-2027';
  try{
+  const wb=XLSX.read(await file.arrayBuffer(),{type:'array',cellDates:true});
+  const param=wb.Sheets['Param'], evs=wb.Sheets['Evals'];
+  if(!param||!evs)throw new Error('Le classeur doit contenir les feuilles Param et Evals.');
+  const p=XLSX.utils.sheet_to_json(param,{header:1,defval:''});
+  const e=XLSX.utils.sheet_to_json(evs,{header:1,defval:''});
+  const importedStudents=[];
+  for(let r=1;r<p.length;r++){const last=String(p[r]?.[0]||'').trim();if(!last||last.toLowerCase()==='nom')continue;const parts=last.split(/\s+/);const first=parts.length>1?parts.slice(1).join(' '):'';importedStudents.push([parts[0],first])}
+  const importedEvals=[];
+  const headers=e[1]||[], titles=e[2]||[], dates=e[3]||[], codes=e[4]||[], maxs=e[5]||[], coefs=e[6]||[];
+  for(let col=0;col<Math.max(headers.length,titles.length,codes.length,maxs.length);col++){
+   const title=String(titles[col]||'').trim(), code=String(codes[col]||'').trim();
+   if(!title||!code||!/^C\d+$/.test(code))continue;
+   let date=dates[col];if(date instanceof Date)date=date.toISOString().slice(0,10);else if(date)date=String(date).slice(0,10);else date=new Date().toISOString().slice(0,10);
+   importedEvals.push([title,code,Number(maxs[col])||20,Number(coefs[col])||1,date]);
+  }
   let cs=await api('/rest/v1/classes?select=id,name,school_year&name=eq.'+encodeURIComponent(className)+'&limit=1');
   let classId=cs[0]?.id;
-  if(!classId){
-   const created=await api('/rest/v1/classes',{method:'POST',headers:{Prefer:'return=representation'},body:JSON.stringify({name:className,school_year:year,teacher_id:teacherId})});
-   classId=created[0].id;
-  }
-  for(const s of excelStructureStudents){
+  if(!classId){const created=await api('/rest/v1/classes',{method:'POST',headers:{Prefer:'return=representation'},body:JSON.stringify({name:className,school_year:year,teacher_id:teacherId})});classId=created[0].id}
+  for(const s of importedStudents){
    const exists=await api('/rest/v1/students?select=id&class_id=eq.'+encodeURIComponent(classId)+'&last_name=eq.'+encodeURIComponent(s[0])+'&first_name=eq.'+encodeURIComponent(s[1])+'&limit=1');
    if(!exists.length)await api('/rest/v1/students',{method:'POST',headers:{Prefer:'return=minimal'},body:JSON.stringify({class_id:classId,last_name:s[0],first_name:s[1]})});
   }
-  const crows=await api('/rest/v1/competencies?select=id,code');
-  const cmap=Object.fromEntries(crows.map(c=>[c.code,c.id]));
-  for(const e of excelStructureEvals){
+  const crows=await api('/rest/v1/competencies?select=id,code'),cmap=Object.fromEntries(crows.map(c=>[c.code,c.id]));
+  for(const e of importedEvals){
    const exists=await api('/rest/v1/evaluations?select=id&class_id=eq.'+encodeURIComponent(classId)+'&title=eq.'+encodeURIComponent(e[0])+'&limit=1');
    let eid=exists[0]?.id;
-   if(!eid){
-    const created=await api('/rest/v1/evaluations',{method:'POST',headers:{Prefer:'return=representation'},body:JSON.stringify({class_id:classId,title:e[0],evaluated_at:'2026-09-30'})});
-    eid=created[0].id;
-   }
+   if(!eid){const created=await api('/rest/v1/evaluations',{method:'POST',headers:{Prefer:'return=representation'},body:JSON.stringify({class_id:classId,title:e[0],evaluated_at:e[4]})});eid=created[0].id}
    const cid=cmap[e[1]];
-   if(cid){
-    const link=await api('/rest/v1/evaluation_competencies?select=evaluation_id&evaluation_id=eq.'+encodeURIComponent(eid)+'&competency_id=eq.'+encodeURIComponent(cid)+'&limit=1');
-    if(!link.length)await api('/rest/v1/evaluation_competencies',{method:'POST',headers:{Prefer:'return=minimal'},body:JSON.stringify({evaluation_id:eid,competency_id:cid,max_score:e[2],coefficient:e[3]})});
-   }
+   if(cid){const link=await api('/rest/v1/evaluation_competencies?select=evaluation_id&evaluation_id=eq.'+encodeURIComponent(eid)+'&competency_id=eq.'+encodeURIComponent(cid)+'&limit=1');if(!link.length)await api('/rest/v1/evaluation_competencies',{method:'POST',headers:{Prefer:'return=minimal'},body:JSON.stringify({evaluation_id:eid,competency_id:cid,max_score:e[2],coefficient:e[3]})})}
   }
-  await loadData();toast('Structure du classeur importée — notes non importées');
+  await loadData();toast(importedStudents.length+' élèves et '+importedEvals.length+' évaluations importés');
  }catch(e){toast('Import impossible : '+e.message)}
 }
 function render(){
